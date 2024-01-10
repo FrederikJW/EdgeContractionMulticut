@@ -1,0 +1,11 @@
+build/
+dist/
+_build/
+_generate/
+*.so
+*.py[cod]
+*.egg-info
+*env*
+.vs
+pybind11
+docs
