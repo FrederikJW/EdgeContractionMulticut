@@ -10,6 +10,10 @@
 #include <queue>
 #include <stdexcept>
 #include <limits>
+#include <chrono>
+
+#include "andres/graph/graph.hxx"
+#include "andres/graph/multicut/greedy-additive.hxx"
 
 namespace py = pybind11;
 
@@ -111,7 +115,6 @@ public:
     };
 
     std::set<int> contract(int node1, int node2) {
-        py::print("contraction:", node1, node2);
         for (const auto& edge : getEdges(node2)) {
             int neighbor = edge.node2;
 
@@ -136,7 +139,6 @@ public:
         };
 
         Edge edge = getEdge(node1, node2);
-        py::print("contracting edge:", edge.id);
 
         allNodes.erase(node2);
         adjacencyList.erase(node2);
@@ -170,8 +172,9 @@ public:
         };
     };
 
-    std::set<int> solve() {
+    std::tuple<std::set<int>, float> solve() {
         py::print("start solving");
+        auto start = std::chrono::high_resolution_clock::now();
 
         std::vector<int> allEdges = graph.getAllEdgeIds();
         std::set<int> multicut(allEdges.begin(), allEdges.end());
@@ -181,15 +184,13 @@ public:
             int maxEdgeCost = 0;
             Edge maxCostEdge;
             for (const auto& edge : graph.getAllEdges()) {
-                if (!multicut.contains(edge.id)) continue;
+                if (multicut.find(edge.id) == multicut.end()) continue;
 
                 if (edge.cost > maxEdgeCost) {
                     maxEdgeCost = edge.cost;
                     maxCostEdge = edge;
                 }
             };
-
-            py::print("max edge:", maxCostEdge.id, maxEdgeCost);
 
             // stop algorithm if there is no edge to contract left
             if (maxEdgeCost == 0) break;
@@ -200,10 +201,43 @@ public:
             std::set_difference(multicut.begin(), multicut.end(), ids.begin(), ids.end(), std::inserter(setDifference, setDifference.begin()));
             multicut = setDifference;
         };
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         
         py::print("finished solving");
-        return multicut;
+        return { multicut, static_cast<float>(elapsed.count()) };
     };
+};
+
+std::tuple<std::set<int>, float> greedyAdditiveEdgeContraction(const int numVertices, const std::vector<std::tuple<int, int, int>>& edges) {
+    andres::graph::Graph<> graph;
+
+    graph.insertVertices(numVertices);
+
+    std::vector<double> weights(edges.size());
+
+    double i = 0;
+    for (const auto& [node1, node2, weight] : edges) {
+        graph.insertEdge(node1, node2);
+        weights[i++] = weight;
+    };
+
+    std::vector<char> edge_labels(graph.numberOfEdges());
+
+    auto start = std::chrono::high_resolution_clock::now();
+    andres::graph::multicut::greedyAdditiveEdgeContraction(graph, weights, edge_labels);
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::set<int> multicut;
+    for (double i = 0; i < graph.numberOfEdges(); i++) {
+        if (edge_labels[i] == 1) {
+            multicut.insert(i);
+        };
+    };
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    return { multicut, static_cast<float>(elapsed.count()) };
 };
 
 /*
@@ -240,6 +274,9 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
            add
            subtract
     )pbdoc";
+    m.def("greedyAdditiveEdgeContraction", &greedyAdditiveEdgeContraction, R"pbdoc(
+        The greedy additive edge contraction algorithm from Björn Andres repository.
+    )pbdoc");
     
     pybind11::class_<LargestPositiveCost>(m, "LargestPositiveCost")
         .def(pybind11::init<>())
