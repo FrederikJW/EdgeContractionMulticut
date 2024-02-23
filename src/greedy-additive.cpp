@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <cstddef>
+#include <functional>
 #include <chrono>
 #include <iterator>
 #include <vector>
@@ -18,31 +19,44 @@
 
 namespace py = pybind11;
 
+const size_t maxInt = std::numeric_limits<size_t>::max();
+const double maxDouble = std::numeric_limits<double>::max();
+
+// hash for an unordered set of tuples
+struct Hash {
+    size_t operator()(const std::tuple<size_t, size_t>& tuple) const {
+        const auto& [x, y] = tuple;
+        size_t hash1 = std::hash<size_t>{}(x);
+        size_t hash2 = std::hash<size_t>{}(y);
+        return hash1 ^ (hash2 << 1); // Simple XOR hash combiner
+    }
+};
+
 
 // class copied from andres greedy-additive
 class DynamicGraph
 {
 public:
-    DynamicGraph(int n) :
+    DynamicGraph(size_t n) :
         vertices_(n)
     {}
 
-    bool edgeExists(int a, int b) const
+    bool edgeExists(size_t a, size_t b) const
     {
         return !vertices_[a].empty() && vertices_[a].find(b) != vertices_[a].end();
     }
 
-    std::map<int, int> const& getAdjacentVertices(int v) const
+    std::map<size_t, double> const& getAdjacentVertices(size_t v) const
     {
         return vertices_[v];
     }
 
-    int getEdgeWeight(int a, int b) const
+    size_t getEdgeWeight(size_t a, size_t b) const
     {
         return vertices_[a].at(b);
     }
 
-    void removeVertex(int v)
+    void removeVertex(size_t v)
     {
         for (auto& p : vertices_[v])
             vertices_[p.first].erase(v);
@@ -50,20 +64,30 @@ public:
         vertices_[v].clear();
     }
 
-    void updateEdgeWeight(int a, int b, int w)
+    void updateEdgeWeight(size_t a, size_t b, double w)
     {
         vertices_[a][b] += w;
         vertices_[b][a] += w;
+        if (a < b) {
+            edges_.emplace(a, b);
+        } else {
+            edges_.emplace(b, a);
+        }
+    }
+
+    std::unordered_set<std::tuple<size_t, size_t>, Hash> getEdges() {
+        return edges_;
     }
 
 private:
-    std::vector<std::map<int, int>> vertices_;
+    std::vector<std::map<size_t, double>> vertices_;
+    std::unordered_set<std::tuple<size_t, size_t>, Hash> edges_;
 };
 
 // struct copied from andres greedy-additive
 struct Edge
 {
-    Edge(int _a, int _b, int _w)
+    Edge(size_t _a, size_t _b, double _w)
     {
         if (_a > _b)
             std::swap(_a, _b);
@@ -74,10 +98,10 @@ struct Edge
         w = _w;
     }
 
-    int a;
-    int b;
-    int edition;
-    int w;
+    size_t a;
+    size_t b;
+    size_t edition;
+    double w;
 
     bool operator <(Edge const& other) const
     {
@@ -85,9 +109,128 @@ struct Edge
     }
 };
 
-// altered version from andres greedy-additive
-std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int numVertices, const std::vector<std::tuple<int, int, int>>& edges) {
-    std::chrono::milliseconds contract_elapsed(0);
+size_t find(std::vector<size_t>& parent, size_t i){
+    if (parent[i] == i) {
+        return i;
+    }
+    return find(parent, parent[i]);
+}
+
+void unionSet(std::vector<size_t>& parent, std::vector<size_t>& rank, size_t x, size_t y) {
+    size_t xroot = find(parent, x);
+    size_t yroot = find(parent, y);
+
+    // Attach smaller rank tree under root of high rank
+    // tree (Union by Rank)
+    if (rank[xroot] < rank[yroot]) {
+        parent[xroot] = yroot;
+    }
+    else if (rank[xroot] > rank[yroot]) {
+        parent[yroot] = xroot;
+    }
+    // If ranks are same, then make one as root and
+    // increment its rank by one
+    else {
+        parent[yroot] = xroot;
+        rank[xroot]++;
+    }
+}
+
+// source: https://www.geeksforgeeks.org/boruvkas-algorithm-greedy-algo-9/
+andres::graph::Graph<> boruvkaMST(size_t numVertices, DynamicGraph graph) {
+    py::print("num vertices:", numVertices);
+
+    std::vector<size_t> parent(numVertices);
+    andres::graph::Graph<> MSTgraph;
+    MSTgraph.insertVertices(numVertices);
+
+    // An array to store index of the best edge of
+    // subset. It store [u,v,w] for each component
+    std::vector<size_t> rank(numVertices);
+    std::vector<std::vector<size_t>> best(numVertices, std::vector<size_t>(3, -1));
+
+    // Initially there are V different trees.
+    // Finally there will be one tree that will be MST
+    size_t numTrees = numVertices;
+    size_t MSTweight = 0;
+
+    // Create V subsets with single elements
+    for (size_t node = 0; node < numVertices; node++) {
+        parent[node] = node;
+        rank[node] = 0;
+    }
+
+    // Keep combining components (or sets) until all
+    // components are not combined into single MST
+    bool changing = true;
+    while (changing) {
+        changing = false;
+
+        // Traverse through all edges and update
+        // best of every component
+        for (const auto [u, v] : graph.getEdges()) {
+            if ( u >= numVertices || v >= numVertices)
+                throw std::runtime_error("node has invalid value: " + std::to_string(u) + ", " + std::to_string(v));
+
+            size_t w = graph.getEdgeWeight(u, v);
+
+            // ignore negative edges
+            if (w < 0)
+                continue;
+
+            size_t set1 = find(parent, u),
+                   set2 = find(parent, v);
+
+            // If two corners of current edge belong to
+            // same set, ignore current edge. Else check
+            // if current edge is closer to previous
+            // best edges of set1 and set2
+            if (set1 != set2) {
+                if (best[set1][2] == -1 || best[set1][2] < w) {
+                    best[set1] = { u, v, w };
+                }
+                if (best[set2][2] == -1 || best[set2][2] < w) {
+                    best[set2] = { u, v, w };
+                }
+            }
+        }
+
+        // Consider the above picked best edges and
+        // add them to MST
+        for (size_t node = 0; node < numVertices; node++) {
+
+            // Check if best for current set exists
+            if (best[node][2] != -1) {
+                size_t u = best[node][0],
+                       v = best[node][1],
+                       w = best[node][2];
+                size_t set1 = find(parent, u),
+                       set2 = find(parent, v);
+                if (set1 != set2) {
+                    changing = true;
+                    MSTweight += w;
+                    unionSet(parent, rank, set1, set2);
+                    if (u >= numVertices || v >= numVertices)
+                        throw std::runtime_error("node has invalid value: " + std::to_string(u) + ", " + std::to_string(v));
+                    MSTgraph.insertEdge(u, v);
+                    numTrees--;
+                }
+            }
+        }
+        for (size_t node = 0; node < numVertices; node++) {
+
+            // reset best array
+            best[node][2] = -1;
+        }
+    }
+
+    py::print("total weight", MSTweight);
+    py::print("total edges", MSTgraph.numberOfEdges());
+
+    return MSTgraph;
+}
+
+std::tuple<std::set<size_t>, float> spanningTreeEdgeContraction(const size_t numVertices, const std::vector<std::tuple<size_t, size_t, double>>& edges) {
 
     // constructing the graph from parameters
     andres::graph::Graph<> graph;
@@ -96,7 +239,155 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
 
     std::vector<double> edge_values(edges.size());
 
-    double i = 0;
+    size_t i = 0;
+    for (const auto& [node1, node2, weight] : edges) {
+        graph.insertEdge(node1, node2);
+        edge_values[i++] = weight;
+    };
+
+    std::vector<char> edge_labels(graph.numberOfEdges());
+
+
+    // declaring objects required for the algorithm
+    DynamicGraph original_graph_cp(graph.numberOfVertices());
+
+    // start timer
+    auto start = std::chrono::high_resolution_clock::now();
+
+    py::print("constructing dynamic graph");
+    // constructing the dynamic graph that will be altered
+    for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+    {
+        auto a = graph.vertexOfEdge(i, 0);
+        auto b = graph.vertexOfEdge(i, 1);
+
+        original_graph_cp.updateEdgeWeight(a, b, edge_values[i]);
+
+        auto e = Edge(a, b, edge_values[i]);
+    };
+
+    // initializing the partition which will define the multicut
+    andres::Partition<size_t> partition(graph.numberOfVertices());
+
+    py::print("constructing maximum spanning tree");
+    // get maximum spanning tree
+    andres::graph::Graph<> MSTgraph = boruvkaMST(graph.numberOfVertices(), original_graph_cp);
+    py::print("finished constructing maximum spanning tree");
+
+    py::print("eliminating conflicts");
+    size_t numEdges = graph.numberOfEdges();
+    // eliminate conflicts
+    for (size_t i = 0; i < numEdges; ++i) {
+
+        double weight = edge_values[i];
+        if (weight >= 0)
+            continue;
+        auto node1 = graph.vertexOfEdge(i, 0);
+        auto node2 = graph.vertexOfEdge(i, 1);
+
+        // if path between node1 and node2 remove edge with smalles weight
+        std::queue<std::tuple<size_t, size_t, size_t, double>> Q;
+        Q.emplace( node1, node1, -1, maxDouble);
+        bool pathExists = false;
+        while (!Q.empty() && !pathExists) {
+            auto& [curNode, predecessor, minEdge, minWeight] = Q.front();
+            Q.pop();
+            
+            //for (auto it = MSTgraph.adjacenciesFromVertexBegin(curNode); it != MSTgraph.adjacenciesFromVertexEnd(curNode); ++it) {
+            for (size_t i = 0; i < MSTgraph.numberOfEdgesFromVertex(curNode); i++) {
+                auto adjacency = MSTgraph.adjacencyFromVertex(curNode, i);
+                size_t nextNode = adjacency.vertex();
+                size_t mstEdge = adjacency.edge();
+                if (nextNode == predecessor)
+                    continue;
+
+                /*
+                auto edgeTuple = graph.findEdge(curNode, nextNode);
+                if (!std::get<0>(edgeTuple)) {
+                    throw std::runtime_error("edge: " + std::to_string(curNode) + ", " + std::to_string(nextNode) + " does not exist.");
+                }*/
+
+                size_t edge = std::get<1>(graph.findEdge(curNode, nextNode));
+
+                double weight = edge_values[edge];
+                if (weight < minWeight) {
+                    minEdge = mstEdge;
+                    minWeight = weight;
+                }
+
+                if (nextNode == node2) {
+                    MSTgraph.eraseEdge(minEdge);
+                    pathExists = true;
+                    break;
+                }
+                else {
+                    Q.emplace( nextNode, curNode, minEdge, minWeight );
+                }
+            }
+        }
+    }
+
+    py::print("finished eliminating conflicts");
+
+    // contract edges sequantially (this can potentially be parallized)
+    for (size_t i = 0; i < MSTgraph.numberOfEdges(); ++i) {
+        auto node1 = MSTgraph.vertexOfEdge(i, 0);
+        auto node2 = MSTgraph.vertexOfEdge(i, 1);
+
+        if (!original_graph_cp.edgeExists(node1, node2))
+            continue;
+
+        auto stable_vertex = node1;
+        auto merge_vertex = node2;
+
+        if (original_graph_cp.getAdjacentVertices(stable_vertex).size() < original_graph_cp.getAdjacentVertices(merge_vertex).size())
+            std::swap(stable_vertex, merge_vertex);
+
+        // update partition
+        partition.merge(stable_vertex, merge_vertex);
+
+        // update dynamic graph
+        for (auto& p : original_graph_cp.getAdjacentVertices(merge_vertex)) {
+            if (p.first == stable_vertex)
+                continue;
+
+            original_graph_cp.updateEdgeWeight(stable_vertex, p.first, p.second);
+        }
+
+        original_graph_cp.removeVertex(merge_vertex);
+    }
+
+    // end timer
+    auto end = std::chrono::high_resolution_clock::now();
+
+    // write cut labels to graph
+    for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+        edge_labels[i] = partition.find(graph.vertexOfEdge(i, 0)) == partition.find(graph.vertexOfEdge(i, 1)) ? 0 : 1;
+
+    // construct multicut
+    std::set<size_t> multicut;
+    for (size_t i = 0; i < graph.numberOfEdges(); i++) {
+        if (edge_labels[i] == 1) {
+            multicut.insert(i);
+        };
+    };
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    return { multicut, static_cast<float>(elapsed.count()) };
+}
+
+// altered version from andres greedy-additive
+std::tuple<std::set<size_t>, float> greedyParallelAdditiveEdgeContraction(const size_t numVertices, const std::vector<std::tuple<size_t, size_t, size_t>>& edges) {
+    std::chrono::milliseconds contract_elapsed(0);
+
+    // constructing the graph from parameters
+    andres::graph::Graph<> graph;
+
+    graph.insertVertices(numVertices);
+
+    std::vector<size_t> edge_values(edges.size());
+
+    size_t i = 0;
     for (const auto& [node1, node2, weight] : edges) {
         graph.insertEdge(node1, node2);
         edge_values[i++] = weight;
@@ -109,16 +400,16 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
     auto start = std::chrono::high_resolution_clock::now();
 
     // declaring objects required for the algorithm
-    std::vector<std::map<int, int>> edge_editions(graph.numberOfVertices());
+    std::vector<std::map<size_t, size_t>> edge_editions(graph.numberOfVertices());
     DynamicGraph original_graph_cp(graph.numberOfVertices());
     std::priority_queue<Edge> Q;
     std::vector<Edge> edge_contraction_vector;
     std::vector<Edge> skipped_edges;
-    std::vector<int> vertex_merge_vector;
+    std::vector<size_t> vertex_merge_vector;
     
     py::print("constructing dynamic graph");
     // constructing the dynamic graph that will be altered
-    for (int i = 0; i < graph.numberOfEdges(); ++i)
+    for (size_t i = 0; i < graph.numberOfEdges(); ++i)
     {
         auto a = graph.vertexOfEdge(i, 0);
         auto b = graph.vertexOfEdge(i, 1);
@@ -132,7 +423,7 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
     };
 
     // initializing the partition which will define the multicut
-    andres::Partition<int> partition(graph.numberOfVertices());
+    andres::Partition<size_t> partition(graph.numberOfVertices());
 
     py::print("start contracting");
     // for edge in contraction set
@@ -145,9 +436,9 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
         // py::print("find edges to contract");
 
         // find edges to contract
-        int last_stable_vertex;
-        int m = 10;
-        int n = 0;
+        size_t last_stable_vertex;
+        size_t m = 10;
+        size_t n = 0;
 
         // py::print(Q.size());
 
@@ -244,7 +535,7 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
     py::print("finished solving");
 
     // write cut labels to graph
-    for (int i = 0; i < graph.numberOfEdges(); ++i)
+    for (size_t i = 0; i < graph.numberOfEdges(); ++i)
         edge_labels[i] = partition.find(graph.vertexOfEdge(i, 0)) == partition.find(graph.vertexOfEdge(i, 1)) ? 0 : 1;
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -252,8 +543,8 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
     py::print("constructing multicut");
 
     // construct multicut
-    std::set<int> multicut;
-    for (double i = 0; i < graph.numberOfEdges(); i++) {
+    std::set<size_t> multicut;
+    for (size_t i = 0; i < graph.numberOfEdges(); i++) {
         if (edge_labels[i] == 1) {
             multicut.insert(i);
         };
@@ -265,14 +556,14 @@ std::tuple<std::set<int>, float> greedyParallelAdditiveEdgeContraction(const int
     return { multicut, static_cast<float>(elapsed.count()) };
 };
 
-std::tuple<std::set<int>, float> greedyAdditiveEdgeContraction(const int numVertices, const std::vector<std::tuple<int, int, int>>& edges) {
+std::tuple<std::set<size_t>, float> greedyAdditiveEdgeContraction(const size_t numVertices, const std::vector<std::tuple<size_t, size_t, double>>& edges) {
     andres::graph::Graph<> graph;
 
     graph.insertVertices(numVertices);
 
     std::vector<double> weights(edges.size());
 
-    double i = 0;
+    size_t i = 0;
     for (const auto& [node1, node2, weight] : edges) {
         graph.insertEdge(node1, node2);
         weights[i++] = weight;
@@ -286,8 +577,8 @@ std::tuple<std::set<int>, float> greedyAdditiveEdgeContraction(const int numVert
     andres::graph::multicut::greedyAdditiveEdgeContraction(graph, weights, edge_labels);
     auto end = std::chrono::high_resolution_clock::now();
 
-    std::set<int> multicut;
-    for (double i = 0; i < graph.numberOfEdges(); i++) {
+    std::set<size_t> multicut;
+    for (size_t i = 0; i < graph.numberOfEdges(); i++) {
         if (edge_labels[i] == 1) {
             multicut.insert(i);
         };
@@ -297,7 +588,7 @@ std::tuple<std::set<int>, float> greedyAdditiveEdgeContraction(const int numVert
     return { multicut, static_cast<float>(elapsed.count()) };
 };
 
-std::tuple<std::set<int>, float> solveFromFile(const std::string fileName) {
+std::tuple<std::set<size_t>, float> solveFromFile(const std::string fileName) {
     std::ifstream file;
 
     file.open(fileName);
@@ -307,9 +598,9 @@ std::tuple<std::set<int>, float> solveFromFile(const std::string fileName) {
     };
 
     std::string line;
-    int i = 0;
-    int numVertices = 0;
-    std::vector<std::tuple<int, int, int>> edges;
+    size_t i = 0;
+    size_t numVertices = 0;
+    std::vector<std::tuple<size_t, size_t, double>> edges;
     while (std::getline(file, line)) {
         if (i == 0) {
             // process number of vertices
@@ -318,8 +609,8 @@ std::tuple<std::set<int>, float> solveFromFile(const std::string fileName) {
         else {
             // process edges
             std::istringstream iss(line);
-            int weight;
-            int j = i;
+            double weight;
+            size_t j = i;
             while (iss >> weight) {
                 edges.emplace_back(i - 1, j++, weight);
             }
@@ -329,7 +620,8 @@ std::tuple<std::set<int>, float> solveFromFile(const std::string fileName) {
 
     py::print(numVertices, edges.size());
 
-    return greedyAdditiveEdgeContraction(numVertices, edges);
+    return spanningTreeEdgeContraction(numVertices, edges);
+    //return greedyAdditiveEdgeContraction(numVertices, edges);
 };
 
 
@@ -349,4 +641,5 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
     m.def("greedyParallelAdditiveEdgeContraction", &greedyParallelAdditiveEdgeContraction, R"pbdoc(Parallel greedy additive edge contraction)pbdoc");
     m.def("greedyAdditiveEdgeContraction", &greedyAdditiveEdgeContraction, R"pbdoc(Classic greedy additive edge contraction by Björn Andres)pbdoc");
     m.def("greedyAdditiveEdgeContractionFromFile", &solveFromFile, R"pbdoc(Classic greedy additive edge contraction by Björn Andres)pbdoc");
+    m.def("spanningTreeEdgeContraction", &spanningTreeEdgeContraction, R"pbdoc(Spanning tree edge contraction)pbdoc");
 }
