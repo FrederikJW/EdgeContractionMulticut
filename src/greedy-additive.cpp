@@ -59,7 +59,7 @@ public:
         return vertices_[v];
     }
 
-    size_t getEdgeWeight(size_t a, size_t b) const
+    double getEdgeWeight(size_t a, size_t b) const
     {
         return vertices_[a].at(b);
     }
@@ -286,7 +286,173 @@ public:
             }
         }
 
+        // end timer
+        auto end = std::chrono::high_resolution_clock::now();
 
+        py::print("calculating multicut");
+
+        // write cut labels to graph
+        for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+            edge_labels[i] = partition.find(graph.vertexOfEdge(i, 0)) == partition.find(graph.vertexOfEdge(i, 1)) ? 0 : 1;
+
+        // construct multicut
+        constructMulticut(edge_labels);
+
+        py::print("finished solving");
+
+        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    }
+
+    void maximumMatchingWithCutoff() {
+        auto& [graph, weights] = constructGraphAndWeights();
+        std::vector<char> edge_labels(graph.numberOfEdges());
+
+        DynamicGraph original_graph_cp(graph.numberOfVertices());
+
+        // start timer
+        auto start = std::chrono::high_resolution_clock::now();
+
+        py::print("constructing dynamic graph");
+        // constructing the dynamic graph that will be altered
+        for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+        {
+            auto a = graph.vertexOfEdge(i, 0);
+            auto b = graph.vertexOfEdge(i, 1);
+
+            original_graph_cp.updateEdgeWeight(a, b, weights[i]);
+
+            auto e = Edge(a, b, weights[i]);
+        };
+
+        // initializing the partition which will define the multicut
+        andres::Partition<size_t> partition(graph.numberOfVertices());
+
+        py::print("find handshakes");
+
+        // repeatedly apply the one handshake algorithm until no improvement can be done
+        bool contracted = true;
+        while (contracted) {
+            contracted = false;
+            std::unordered_set<std::tuple<size_t, size_t>, Hash> edge_contraction_set;
+
+            py::print("copying graph");
+            DynamicGraph handshake_graph = original_graph_cp;
+            py::print("created copy of graph:", handshake_graph.getEdges().size());
+
+            // repeatedly search for handshakes until none can be found
+            bool found_handshake = true;
+            while (found_handshake) {
+                found_handshake = false;
+
+                std::vector<size_t> hands(graph.numberOfVertices());
+
+                // extend hand to neighbor (can be parallelized on GPU)
+                for (size_t node = 0; node < graph.numberOfVertices(); ++node) {
+                    size_t strongest_neighbor = NOT_PRESENT;
+                    double strongest_neighbor_weight = minDouble;
+                    for (const auto& [neighbor, weight] : handshake_graph.getAdjacentVertices(node)) {
+                        if (weight > 0 && weight > strongest_neighbor_weight) {
+                            strongest_neighbor = neighbor;
+                            strongest_neighbor_weight = weight;
+                        }
+                    }
+                    hands[node] = strongest_neighbor;
+                }
+
+                // find handshakes (can be parallelized on GPU)
+                for (const auto& [u, v] : handshake_graph.getEdges()) {
+                    if (!handshake_graph.edgeExists(u, v))
+                        continue;
+                    if (hands[u] == v && hands[v] == u) {
+                        found_handshake = true;
+                        edge_contraction_set.emplace(u, v);
+                        handshake_graph.removeVertex(u);
+                        handshake_graph.removeVertex(v);
+                    }
+                }
+                py::print(edge_contraction_set.size());
+            }
+            py::print("found handshake:", found_handshake);
+
+            py::print("contracting edges:", edge_contraction_set.size());
+            const auto& [u, v] = *edge_contraction_set.cbegin();
+            py::print(u, v);
+
+            // contract edges sequantially (this can potentially be parallized)
+            for (const auto& [u, v] : edge_contraction_set) {
+                if (!original_graph_cp.edgeExists(u, v))
+                    throw std::runtime_error("edge: " + std::to_string(u) + ", " + std::to_string(v) + " does not exist.");
+
+                auto stable_vertex = u;
+                auto merge_vertex = v;
+                contracted = true;
+
+                if (original_graph_cp.getAdjacentVertices(stable_vertex).size() < original_graph_cp.getAdjacentVertices(merge_vertex).size())
+                    std::swap(stable_vertex, merge_vertex);
+
+                // update partition
+                partition.merge(stable_vertex, merge_vertex);
+
+                // update dynamic graph
+                for (auto& p : original_graph_cp.getAdjacentVertices(merge_vertex)) {
+                    if (p.first == stable_vertex)
+                        continue;
+                    original_graph_cp.updateEdgeWeight(stable_vertex, p.first, p.second);
+                }
+
+                original_graph_cp.removeVertex(merge_vertex);
+            }
+
+            if (edge_contraction_set.size() == 1)
+                break;
+        }
+
+        std::vector<std::map<size_t, size_t>> edge_editions(graph.numberOfVertices());
+        std::priority_queue<Edge> Q;
+        for (const auto& [u, v] : original_graph_cp.getEdges()) {
+            auto weight = original_graph_cp.getEdgeWeight(u, v);
+            auto e = Edge(u, v, weight);
+            e.edition = ++edge_editions[e.a][e.b];
+
+            Q.push(e);
+        }
+
+        while (!Q.empty())
+        {
+            auto edge = Q.top();
+            Q.pop();
+
+            if (!original_graph_cp.edgeExists(edge.a, edge.b) || edge.edition < edge_editions[edge.a][edge.b])
+                continue;
+
+            if (edge.w < 0)
+                break;
+
+            auto stable_vertex = edge.a;
+            auto merge_vertex = edge.b;
+
+            if (original_graph_cp.getAdjacentVertices(stable_vertex).size() < original_graph_cp.getAdjacentVertices(merge_vertex).size())
+                std::swap(stable_vertex, merge_vertex);
+
+            partition.merge(stable_vertex, merge_vertex);
+
+            py::print("contracting:", stable_vertex, merge_vertex, edge.w);
+
+            for (auto& p : original_graph_cp.getAdjacentVertices(merge_vertex))
+            {
+                if (p.first == stable_vertex)
+                    continue;
+
+                original_graph_cp.updateEdgeWeight(stable_vertex, p.first, p.second);
+
+                auto e = Edge(stable_vertex, p.first, original_graph_cp.getEdgeWeight(stable_vertex, p.first));
+                e.edition = ++edge_editions[e.a][e.b];
+
+                Q.push(e);
+            }
+
+            original_graph_cp.removeVertex(merge_vertex);
+        }
 
         // end timer
         auto end = std::chrono::high_resolution_clock::now();
@@ -796,6 +962,7 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
         .def("greedy_matchings_edge_contraction", &EdgeContractionSolver::greedyMatchingsEdgeContraction)
         .def("spanning_tree_edge_contraction", &EdgeContractionSolver::spanningTreeEdgeContraction)
         .def("maximum_matching", &EdgeContractionSolver::maximumMatching)
+        .def("maximum_matching_with_cutoff", &EdgeContractionSolver::maximumMatchingWithCutoff)
         .def("get_multicut", &EdgeContractionSolver::getMulticut)
         .def("get_elapsed_time", &EdgeContractionSolver::getElapsedTime);
 }
