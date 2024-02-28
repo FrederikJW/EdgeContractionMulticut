@@ -147,6 +147,18 @@ public:
         return { graph, weights };
     }
 
+    double getScore() {
+        std::vector<double> weights = std::get<1>(constructGraphAndWeights());
+
+        double score = 0;
+
+        for (const auto& edge : multicut) {
+            score += weights[edge];
+        }
+
+        return score;
+    }
+
     void constructMulticut(std::vector<char> edge_labels) {
         multicut.clear();
         for (size_t i = 0; i < edge_labels.size(); i++) {
@@ -407,6 +419,8 @@ public:
                 break;
         }
 
+        py::print("stopped maximum matching; continueing with greedy additive");
+
         std::vector<std::map<size_t, size_t>> edge_editions(graph.numberOfVertices());
         std::priority_queue<Edge> Q;
         for (const auto& [u, v] : original_graph_cp.getEdges()) {
@@ -435,8 +449,6 @@ public:
                 std::swap(stable_vertex, merge_vertex);
 
             partition.merge(stable_vertex, merge_vertex);
-
-            py::print("contracting:", stable_vertex, merge_vertex, edge.w);
 
             for (auto& p : original_graph_cp.getAdjacentVertices(merge_vertex))
             {
@@ -964,5 +976,6 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
         .def("maximum_matching", &EdgeContractionSolver::maximumMatching)
         .def("maximum_matching_with_cutoff", &EdgeContractionSolver::maximumMatchingWithCutoff)
         .def("get_multicut", &EdgeContractionSolver::getMulticut)
-        .def("get_elapsed_time", &EdgeContractionSolver::getElapsedTime);
+        .def("get_elapsed_time", &EdgeContractionSolver::getElapsedTime)
+        .def("get_score", &EdgeContractionSolver::getScore);
 }
