@@ -159,6 +159,10 @@ public:
         return score;
     }
 
+    std::vector<int> getContractionHistory() {
+        return contractionHistory;
+    }
+
     void constructMulticut(std::vector<char> edge_labels) {
         multicut.clear();
         for (size_t i = 0; i < edge_labels.size(); i++) {
@@ -200,6 +204,7 @@ public:
     void maximumMatching() {
         auto& [graph, weights] = constructGraphAndWeights();
         std::vector<char> edge_labels(graph.numberOfEdges());
+        contractionHistory.clear();
 
         DynamicGraph original_graph_cp(graph.numberOfVertices());
 
@@ -229,9 +234,7 @@ public:
             contracted = false;        
             std::unordered_set<std::tuple<size_t, size_t>, Hash> edge_contraction_set;
             
-            py::print("copying graph");
             DynamicGraph handshake_graph = original_graph_cp;
-            py::print("created copy of graph:", handshake_graph.getEdges().size());
 
             // repeatedly search for handshakes until none can be found
             bool found_handshake = true;
@@ -264,13 +267,9 @@ public:
                         handshake_graph.removeVertex(v);
                     }
                 }
-                py::print(edge_contraction_set.size());
             }
-            py::print("found handshake:", found_handshake);
-
-            py::print("contracting edges:", edge_contraction_set.size());
-            const auto& [u, v] = *edge_contraction_set.cbegin();
-            py::print(u, v);
+            
+            py::print("contracting", edge_contraction_set.size(), "edges");
 
             // contract edges sequantially (this can potentially be parallized)
             for (const auto& [u, v] : edge_contraction_set) {
@@ -296,6 +295,9 @@ public:
 
                 original_graph_cp.removeVertex(merge_vertex);
             }
+
+            if (edge_contraction_set.size() > 0)
+                contractionHistory.push_back(edge_contraction_set.size());
         }
 
         // end timer
@@ -494,7 +496,7 @@ public:
         // Initially there are V different trees.
         // Finally there will be one tree that will be MST
         size_t numTrees = numVertices;
-        size_t MSTweight = 0;
+        double MSTweight = 0;
 
         // Create V subsets with single elements
         for (size_t node = 0; node < numVertices; node++) {
@@ -512,11 +514,13 @@ public:
             // best of every component
             for (const auto [u, v] : graph.getEdges()) {
 
-                size_t w = graph.getEdgeWeight(u, v);
+                double weight = graph.getEdgeWeight(u, v);
 
                 // ignore negative edges
-                if (w < 0)
+                if (weight < 0)
                     continue;
+
+                size_t w = weight;
 
                 size_t set1 = find(parent, u),
                        set2 = find(parent, v);
@@ -572,6 +576,8 @@ public:
         auto& [graph, weights] = constructGraphAndWeights();
         std::vector<char> edge_labels(graph.numberOfEdges());
 
+        contractionHistory.clear();
+
         // declaring objects required for the algorithm
         DynamicGraph original_graph_cp(graph.numberOfVertices());
 
@@ -596,7 +602,7 @@ public:
         // reapeat until no edge can be contracted anymore
         bool contracted = true;
         while (contracted) {
-            contracted = false;        
+            contracted = false;
             py::print("constructing maximum spanning tree");
             // get maximum spanning tree
             andres::graph::Graph<> MSTgraph = boruvkaMST(graph.numberOfVertices(), original_graph_cp);
@@ -604,28 +610,25 @@ public:
 
             py::print("eliminating conflicts");
             size_t numEdges = graph.numberOfEdges();
-            // eliminate conflicts
-            for (size_t i = 0; i < numEdges; ++i) {
 
-                double weight = weights[i];
+            // eliminate conflicts
+            for (const auto& [node1, node2] : original_graph_cp.getEdges()) {
+                double weight = original_graph_cp.getEdgeWeight(node1, node2);
                 if (weight >= 0)
                     continue;
-                auto node1 = graph.vertexOfEdge(i, 0);
-                auto node2 = graph.vertexOfEdge(i, 1);
 
                 // if path between node1 and node2 remove edge with smalles weight
-                std::queue<std::tuple<size_t, size_t, size_t, double>> Q;
-                Q.emplace( node1, node1, -1, maxDouble);
+                std::queue<std::tuple<size_t, size_t, size_t, size_t, double>> Q;
+                Q.emplace( node1, node1, -1, -1, maxDouble);
                 bool pathExists = false;
                 while (!Q.empty() && !pathExists) {
-                    auto& [curNode, predecessor, minEdge, minWeight] = Q.front();
+                    auto& [curNode, predecessor, minVertex1, minVertex2, minWeight] = Q.front();
                     Q.pop();
             
                     //for (auto it = MSTgraph.adjacenciesFromVertexBegin(curNode); it != MSTgraph.adjacenciesFromVertexEnd(curNode); ++it) {
                     for (size_t i = 0; i < MSTgraph.numberOfEdgesFromVertex(curNode); i++) {
                         auto adjacency = MSTgraph.adjacencyFromVertex(curNode, i);
                         size_t nextNode = adjacency.vertex();
-                        size_t mstEdge = adjacency.edge();
                         if (nextNode == predecessor)
                             continue;
 
@@ -635,21 +638,19 @@ public:
                             throw std::runtime_error("edge: " + std::to_string(curNode) + ", " + std::to_string(nextNode) + " does not exist.");
                         }*/
 
-                        size_t edge = std::get<1>(graph.findEdge(curNode, nextNode));
-
-                        double weight = weights[edge];
+                        double weight = original_graph_cp.getEdgeWeight(curNode, nextNode);
                         if (weight < minWeight) {
-                            minEdge = mstEdge;
+                            minVertex1 = curNode;
+                            minVertex2 = nextNode;
                             minWeight = weight;
                         }
-
                         if (nextNode == node2) {
-                            MSTgraph.eraseEdge(minEdge);
+                            MSTgraph.eraseEdge(std::get<1>(MSTgraph.findEdge(minVertex1, minVertex2)));
                             pathExists = true;
                             break;
                         }
                         else {
-                            Q.emplace( nextNode, curNode, minEdge, minWeight );
+                            Q.emplace(nextNode, curNode, minVertex1, minVertex2 , minWeight);
                         }
                     }
                 }
@@ -657,28 +658,19 @@ public:
 
             py::print("finished eliminating conflicts with size:", MSTgraph.numberOfEdges());
 
-            std::vector<size_t> parent(graph.numberOfVertices());
+            std::vector<size_t> parent(MSTgraph.numberOfVertices());
 
-            for (size_t node = 0; node < graph.numberOfVertices(); node++) {
+            for (size_t node = 0; node < MSTgraph.numberOfVertices(); node++) {
                 parent[node] = node;
             }
 
             // contract edges sequantially (this can potentially be parallized)
-            for (size_t i = 0; i < graph.numberOfEdges(); ++i) {
-                auto node1 = graph.vertexOfEdge(i, 0);
-                auto node2 = graph.vertexOfEdge(i, 1);
+            for (size_t i = 0; i < MSTgraph.numberOfEdges(); ++i) {
+                auto node1 = MSTgraph.vertexOfEdge(i, 0);
+                auto node2 = MSTgraph.vertexOfEdge(i, 1);
 
-                if (!std::get<0>(MSTgraph.findEdge(node1, node2)))
-                    continue;
-
-                node1 = find(parent, node1);
-                node2 = find(parent, node2);
-
-                if (!original_graph_cp.edgeExists(node1, node2))
-                    continue;
-
-                auto stable_vertex = node1;
-                auto merge_vertex = node2;
+                auto stable_vertex = find(parent, node1);
+                auto merge_vertex = find(parent, node2);
 
                 if (original_graph_cp.getAdjacentVertices(stable_vertex).size() < original_graph_cp.getAdjacentVertices(merge_vertex).size())
                     std::swap(stable_vertex, merge_vertex);
@@ -699,6 +691,11 @@ public:
                 original_graph_cp.removeVertex(merge_vertex);
                 contracted = true;
             }
+
+            if (MSTgraph.numberOfEdges() > 0)
+                contractionHistory.push_back(MSTgraph.numberOfEdges());
+
+            py::print("anything was contracted:", contracted);
         }
 
         // end timer
@@ -744,7 +741,6 @@ public:
         // reapeat until no edge can be contracted anymore
         bool contracted = true;
         while (contracted) {
-            break;
             contracted = false;
             py::print("constructing maximum spanning tree");
             // get maximum spanning tree
@@ -1145,6 +1141,7 @@ private:
     std::vector<std::tuple<size_t, size_t, double>> edges;
     std::chrono::milliseconds elapsed;
     std::set<int> multicut;
+    std::vector<int> contractionHistory;
 };
 
 
@@ -1174,5 +1171,6 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
         .def("maximum_matching_with_cutoff", &EdgeContractionSolver::maximumMatchingWithCutoff)
         .def("get_multicut", &EdgeContractionSolver::getMulticut)
         .def("get_elapsed_time", &EdgeContractionSolver::getElapsedTime)
-        .def("get_score", &EdgeContractionSolver::getScore);
+        .def("get_score", &EdgeContractionSolver::getScore)
+        .def("get_contraction_history", &EdgeContractionSolver::getContractionHistory);
 }
