@@ -12,9 +12,11 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <iomanip>
 
 #include "andres/graph/graph.hxx"
 #include "andres/graph/multicut/greedy-additive.hxx"
+#include "andres/graph/multicut/kernighan-lin.hxx"
 #include "andres/partition.hxx"
 
 namespace py = pybind11;
@@ -35,7 +37,7 @@ struct Hash {
 };
 
 
-// class copied from andres greedy-additive
+// altered DynamicGraph class from https://github.com/bjoern-andres/graph/blob/master/include/andres/graph/multicut/greedy-additive.hxx
 class DynamicGraph
 {
 public:
@@ -98,7 +100,7 @@ private:
     std::unordered_set<std::tuple<size_t, size_t>, Hash> edges_;
 };
 
-// struct copied from andres greedy-additive
+// altered Edge struct from https://github.com/bjoern-andres/graph/blob/master/include/andres/graph/multicut/greedy-additive.hxx
 struct Edge
 {
     Edge(size_t _a, size_t _b, double _w)
@@ -125,6 +127,14 @@ struct Edge
 
 class EdgeContractionSolver {
 public:
+    EdgeContractionSolver() {
+        trackHistory = false;
+    };
+
+    void activateTrackHistory() {
+        trackHistory = true;
+    };
+
     std::tuple<andres::graph::Graph<>, std::vector<double>> constructGraphAndWeights() {
         py::print("constructing graph");
 
@@ -202,6 +212,9 @@ public:
     }
 
     void maximumMatching() {
+        if (trackHistory)
+            openFile();
+
         auto& [graph, weights] = constructGraphAndWeights();
         std::vector<char> edge_labels(graph.numberOfEdges());
         contractionHistory.clear();
@@ -296,6 +309,12 @@ public:
                 original_graph_cp.removeVertex(merge_vertex);
             }
 
+            if (trackHistory) {
+                writeContractedEdgesHistory(graph, partition);
+                setHistory();
+            }
+                
+
             if (edge_contraction_set.size() > 0)
                 contractionHistory.push_back(edge_contraction_set.size());
         }
@@ -313,6 +332,9 @@ public:
         constructMulticut(edge_labels);
 
         py::print("finished solving");
+
+        if (trackHistory)
+            closeFile();
 
         elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     }
@@ -417,7 +439,7 @@ public:
 
         py::print("stopped maximum matching; continueing with greedy additive");
 
-        // greedy additive edge contraction taken from the andres repository
+        // altered greedy additive edge contraction from https://github.com/bjoern-andres/graph/blob/master/include/andres/graph/multicut/greedy-additive.hxx
         std::vector<std::map<size_t, size_t>> edge_editions(graph.numberOfVertices());
         std::priority_queue<Edge> Q;
         for (const auto& [u, v] : original_graph_cp.getEdges()) {
@@ -480,7 +502,7 @@ public:
         elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     }
 
-    // source: https://www.geeksforgeeks.org/boruvkas-algorithm-greedy-algo-9/
+    // an altered version of: https://www.geeksforgeeks.org/boruvkas-algorithm-greedy-algo-9/
     andres::graph::Graph<> boruvkaMST(size_t numVertices, DynamicGraph graph) {
         py::print("num vertices:", numVertices);
 
@@ -573,6 +595,9 @@ public:
     }
 
     void spanningTreeEdgeContraction() {
+        if (trackHistory)
+            openFile();
+
         auto& [graph, weights] = constructGraphAndWeights();
         std::vector<char> edge_labels(graph.numberOfEdges());
 
@@ -625,18 +650,11 @@ public:
                     auto& [curNode, predecessor, minVertex1, minVertex2, minWeight] = Q.front();
                     Q.pop();
             
-                    //for (auto it = MSTgraph.adjacenciesFromVertexBegin(curNode); it != MSTgraph.adjacenciesFromVertexEnd(curNode); ++it) {
                     for (size_t i = 0; i < MSTgraph.numberOfEdgesFromVertex(curNode); i++) {
                         auto adjacency = MSTgraph.adjacencyFromVertex(curNode, i);
                         size_t nextNode = adjacency.vertex();
                         if (nextNode == predecessor)
                             continue;
-
-                        /*
-                        auto edgeTuple = graph.findEdge(curNode, nextNode);
-                        if (!std::get<0>(edgeTuple)) {
-                            throw std::runtime_error("edge: " + std::to_string(curNode) + ", " + std::to_string(nextNode) + " does not exist.");
-                        }*/
 
                         double weight = original_graph_cp.getEdgeWeight(curNode, nextNode);
                         if (weight < minWeight) {
@@ -692,6 +710,13 @@ public:
                 contracted = true;
             }
 
+            if (trackHistory) {
+                writeContractedEdgesHistory(graph, partition);
+                setHistory();
+            }
+                
+                
+
             if (MSTgraph.numberOfEdges() > 0)
                 contractionHistory.push_back(MSTgraph.numberOfEdges());
 
@@ -710,9 +735,13 @@ public:
 
         py::print("finished solving");
 
+        if (trackHistory)
+            closeFile();
+
         elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     }
 
+    // a test implementation that turned out to not be usefull
     void spanningTreeEdgeContractionContinued() {
         auto& [graph, weights] = constructGraphAndWeights();
         std::vector<char> edge_labels(graph.numberOfEdges());
@@ -766,19 +795,12 @@ public:
                     auto& [curNode, predecessor, minEdge, minWeight] = Q.front();
                     Q.pop();
 
-                    //for (auto it = MSTgraph.adjacenciesFromVertexBegin(curNode); it != MSTgraph.adjacenciesFromVertexEnd(curNode); ++it) {
                     for (size_t i = 0; i < MSTgraph.numberOfEdgesFromVertex(curNode); i++) {
                         auto adjacency = MSTgraph.adjacencyFromVertex(curNode, i);
                         size_t nextNode = adjacency.vertex();
                         size_t mstEdge = adjacency.edge();
                         if (nextNode == predecessor)
                             continue;
-
-                        /*
-                        auto edgeTuple = graph.findEdge(curNode, nextNode);
-                        if (!std::get<0>(edgeTuple)) {
-                            throw std::runtime_error("edge: " + std::to_string(curNode) + ", " + std::to_string(nextNode) + " does not exist.");
-                        }*/
 
                         size_t edge = std::get<1>(graph.findEdge(curNode, nextNode));
 
@@ -907,10 +929,196 @@ public:
         elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     }
 
-    // altered version from andres greedy-additive
-    void greedyMatchingsEdgeContraction() {
+    void greedyMatchingsEdgeContractionWithMulticutApplied(std::set<size_t> preMulticut) {
+        if (trackHistory)
+            openFile();
+
         auto& [graph, weights] = constructGraphAndWeights();
         std::vector<char> edge_labels(graph.numberOfEdges());
+
+        contractionHistory.clear();
+
+        std::chrono::milliseconds contract_elapsed(0);
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // declaring objects required for the algorithm
+        std::vector<std::map<size_t, size_t>> edge_editions(graph.numberOfVertices());
+        DynamicGraph original_graph_cp(graph.numberOfVertices());
+        std::priority_queue<Edge> Q;
+        std::vector<Edge> edge_contraction_vector;
+        std::vector<Edge> skipped_edges;
+        std::vector<size_t> vertex_merge_vector;
+
+        py::print("constructing dynamic graph");
+        // constructing the dynamic graph that will be altered
+        for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+        {   
+            auto a = graph.vertexOfEdge(i, 0);
+            auto b = graph.vertexOfEdge(i, 1);
+
+            original_graph_cp.updateEdgeWeight(a, b, weights[i]);
+
+            auto e = Edge(a, b, weights[i]);
+            e.edition = ++edge_editions[e.a][e.b];
+
+            Q.push(e);
+        };
+
+        py::print("checkpoint");
+
+        // initializing the partition which will define the multicut
+        andres::Partition<size_t> partition(graph.numberOfVertices());
+
+        for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+        {   
+
+            auto it = preMulticut.find(i);
+            if (it != preMulticut.end())
+                continue;
+
+            auto a = graph.vertexOfEdge(i, 0);
+            auto b = graph.vertexOfEdge(i, 1);
+
+            if (!original_graph_cp.edgeExists(a, b))
+                continue;
+
+            auto stable_vertex = a;
+            auto merge_vertex = b;
+
+            if (original_graph_cp.getAdjacentVertices(stable_vertex).size() < original_graph_cp.getAdjacentVertices(merge_vertex).size())
+                std::swap(stable_vertex, merge_vertex);
+
+            // update partition
+            partition.merge(stable_vertex, merge_vertex);
+
+            // update dynamic graph
+            for (auto& p : original_graph_cp.getAdjacentVertices(merge_vertex)) {
+                if (p.first == stable_vertex)
+                    continue;
+
+                original_graph_cp.updateEdgeWeight(stable_vertex, p.first, p.second);
+
+                auto e = Edge(stable_vertex, p.first, original_graph_cp.getEdgeWeight(stable_vertex, p.first));
+                e.edition = ++edge_editions[e.a][e.b];
+
+                Q.push(e);
+            }
+
+            original_graph_cp.removeVertex(merge_vertex);
+        };
+
+        py::print("start contracting");
+        // for edge in contraction set
+        while (!Q.empty())
+        {
+            edge_contraction_vector.clear();
+            vertex_merge_vector.clear();
+            skipped_edges.clear();
+
+            // find edges to contract
+            size_t last_stable_vertex;
+            size_t n = 0;
+
+            while (n < 1 && !Q.empty()) {
+                auto edge = Q.top();
+                Q.pop();
+                if (!original_graph_cp.edgeExists(edge.a, edge.b) || edge.edition < edge_editions[edge.a][edge.b])
+                    continue;
+
+                if (edge.w < 0)
+                    break;
+
+                if (!std::count(vertex_merge_vector.begin(), vertex_merge_vector.end(), edge.a) && !std::count(vertex_merge_vector.begin(), vertex_merge_vector.end(), edge.b)) {
+                    vertex_merge_vector.push_back(edge.a);
+                    vertex_merge_vector.push_back(edge.b);
+                    edge_contraction_vector.push_back(edge);
+                    n++;
+                }
+                else {
+                    skipped_edges.push_back(edge);
+                }
+            }
+
+            if (edge_contraction_vector.empty())
+                break;
+
+            for (const Edge edge : skipped_edges) {
+                Q.push(edge);
+            }
+
+            // py::print("contract found edges");
+
+            auto contract_start = std::chrono::high_resolution_clock::now();
+
+            // contract edges sequantially (this can potentially be parallized)
+            for (const Edge edge : edge_contraction_vector) {
+                if (!original_graph_cp.edgeExists(edge.a, edge.b) || edge.edition < edge_editions[edge.a][edge.b])
+                    continue;
+
+                auto stable_vertex = edge.a;
+                auto merge_vertex = edge.b;
+
+                if (original_graph_cp.getAdjacentVertices(stable_vertex).size() < original_graph_cp.getAdjacentVertices(merge_vertex).size())
+                    std::swap(stable_vertex, merge_vertex);
+
+                // update partition
+                partition.merge(stable_vertex, merge_vertex);
+
+                // update dynamic graph
+                for (auto& p : original_graph_cp.getAdjacentVertices(merge_vertex)) {
+                    if (p.first == stable_vertex)
+                        continue;
+
+                    original_graph_cp.updateEdgeWeight(stable_vertex, p.first, p.second);
+
+                    auto e = Edge(stable_vertex, p.first, original_graph_cp.getEdgeWeight(stable_vertex, p.first));
+                    e.edition = ++edge_editions[e.a][e.b];
+
+                    Q.push(e);
+                }
+
+                original_graph_cp.removeVertex(merge_vertex);
+            }
+
+            if (trackHistory) {
+                writeContractedEdgesHistory(graph, partition);
+                setHistory();
+            }
+
+
+            if (edge_contraction_vector.size() > 0)
+                contractionHistory.push_back(edge_contraction_vector.size());
+
+            auto contract_end = std::chrono::high_resolution_clock::now();
+            contract_elapsed += std::chrono::duration_cast<std::chrono::milliseconds>(contract_end - contract_start);
+
+        }
+
+        // write cut labels to graph
+        for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+            edge_labels[i] = partition.find(graph.vertexOfEdge(i, 0)) == partition.find(graph.vertexOfEdge(i, 1)) ? 0 : 1;
+
+        auto end = std::chrono::high_resolution_clock::now();
+
+        constructMulticut(edge_labels);
+
+        py::print("finished solving");
+
+        if (trackHistory)
+            closeFile();
+
+        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    };
+
+    // altered version from andres greedy-additive
+    void greedyMatchingsEdgeContraction(size_t m = maxInt) {
+        if (trackHistory)
+            openFile();
+
+        auto& [graph, weights] = constructGraphAndWeights();
+        std::vector<char> edge_labels(graph.numberOfEdges());
+
+        contractionHistory.clear();
 
         std::chrono::milliseconds contract_elapsed(0);
         auto start = std::chrono::high_resolution_clock::now();
@@ -949,14 +1157,9 @@ public:
             vertex_merge_vector.clear();
             skipped_edges.clear();
 
-            // py::print("find edges to contract");
-
             // find edges to contract
             size_t last_stable_vertex;
-            size_t m = 10;
             size_t n = 0;
-
-            // py::print(Q.size());
 
             while (n < m && !Q.empty()) {
                 auto edge = Q.top();
@@ -966,11 +1169,7 @@ public:
 
                 if (edge.w < 0)
                     break;
-                /*
-                if (vertex_merge_set.find(edge.a) == vertex_merge_set.end() && vertex_merge_set.find(edge.b) == vertex_merge_set.end()) {
-                    vertex_merge_set.insert(edge.a);
-                    vertex_merge_set.insert(edge.b);
-                 */
+
                 if (!std::count(vertex_merge_vector.begin(), vertex_merge_vector.end(), edge.a) && !std::count(vertex_merge_vector.begin(), vertex_merge_vector.end(), edge.b)) {
                     vertex_merge_vector.push_back(edge.a);
                     vertex_merge_vector.push_back(edge.b);
@@ -1022,29 +1221,17 @@ public:
                 original_graph_cp.removeVertex(merge_vertex);
             }
 
+            if (trackHistory) {
+                writeContractedEdgesHistory(graph, partition);
+                setHistory();
+            }
+                
+
+            if (edge_contraction_vector.size() > 0)
+                contractionHistory.push_back(edge_contraction_vector.size());
+
             auto contract_end = std::chrono::high_resolution_clock::now();
             contract_elapsed += std::chrono::duration_cast<std::chrono::milliseconds>(contract_end - contract_start);
-
-            // py::print("update dynamic graph");
-
-            // update dynamic graph
-            /*
-            for (const auto vertex : vertex_merge_vector) {
-                for (auto& p : original_graph_cp.getAdjacentVertices(vertex))
-                {
-                    if (p.first == last_stable_vertex)
-                        continue;
-
-                    original_graph_cp.updateEdgeWeight(last_stable_vertex, p.first, p.second);
-
-                    auto e = Edge(last_stable_vertex, p.first, original_graph_cp.getEdgeWeight(last_stable_vertex, p.first));
-                    e.edition = ++edge_editions[e.a][e.b];
-
-                    Q.push(e);
-                }
-
-                original_graph_cp.removeVertex(vertex);
-            }*/
 
         }
 
@@ -1058,10 +1245,16 @@ public:
 
         py::print("finished solving");
 
+        if (trackHistory)
+            closeFile();
+
         elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     };
 
     void largestPositiveCostEdgeContraction() {
+        if (trackHistory)
+            openFile();
+
         auto& [graph, weights] = constructGraphAndWeights();
 
         std::vector<char> edge_labels(graph.numberOfEdges());
@@ -1073,6 +1266,31 @@ public:
         constructMulticut(edge_labels);
 
         py::print("finished solving");
+
+        if (trackHistory)
+            closeFile();
+
+        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    };
+
+    void kernighanLin() {
+        if (trackHistory)
+            openFile();
+
+        auto& [graph, weights] = constructGraphAndWeights();
+
+        std::vector<char> edge_labels(graph.numberOfEdges());
+
+        auto start = std::chrono::high_resolution_clock::now();
+        andres::graph::multicut::kernighanLin(graph, weights, edge_labels, edge_labels);
+        auto end = std::chrono::high_resolution_clock::now();
+
+        constructMulticut(edge_labels);
+
+        py::print("finished solving");
+
+        if (trackHistory)
+            closeFile();
 
         elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     };
@@ -1134,6 +1352,51 @@ public:
         return multicut;
     }
 
+    void writeContractedEdgesHistory(andres::graph::Graph<> graph, andres::Partition<size_t> partition) {
+        std::vector<char> edge_labels(graph.numberOfEdges());
+
+        for (size_t i = 0; i < graph.numberOfEdges(); ++i)
+            edge_labels[i] = partition.find(graph.vertexOfEdge(i, 0)) == partition.find(graph.vertexOfEdge(i, 1)) ? 0 : 1;
+
+        for (size_t i = 0; i < edge_labels.size(); i++) {
+            auto it = foundEdges.find(i);
+            if (edge_labels[i] == 0 && it == foundEdges.end()) {
+                contractedEdgesHistory.push_back(i);
+                foundEdges.emplace(i);
+            };
+        };
+    }
+
+    void openFile() {
+        auto now = std::chrono::system_clock::now();
+        auto now_c = std::chrono::system_clock::to_time_t(now);
+        foundEdges.clear();
+
+        std::stringstream ss;
+        ss << std::put_time(std::localtime(&now_c), "%Y-%m-%d_%H-%M-%S");
+        filename = ss.str() + ".txt";
+        file.open(filename);
+        py::print("created file", filename);
+
+    }
+
+    void closeFile() {
+        file.close();
+    }
+
+    void setHistory() {
+        if (!file.is_open()) file.open(filename, std::ios::app);
+
+        for (size_t i = 0; i < contractedEdgesHistory.size(); ++i) {
+            file << contractedEdgesHistory[i];
+            if (i != contractedEdgesHistory.size() - 1) {
+                file << ",";
+            }
+        }
+        file << "\n";
+        contractedEdgesHistory.clear();
+    }
+
 
 
 private:
@@ -1142,6 +1405,11 @@ private:
     std::chrono::milliseconds elapsed;
     std::set<int> multicut;
     std::vector<int> contractionHistory;
+    std::vector<size_t> contractedEdgesHistory;
+    std::set<size_t> foundEdges;
+    std::string filename;
+    std::ofstream file;
+    bool trackHistory;
 };
 
 
@@ -1164,7 +1432,9 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
         .def("load", &EdgeContractionSolver::load)
         .def("load_from_file", &EdgeContractionSolver::loadFromFile)
         .def("largest_positive_cost_edge_contraction", &EdgeContractionSolver::largestPositiveCostEdgeContraction)
-        .def("greedy_matchings_edge_contraction", &EdgeContractionSolver::greedyMatchingsEdgeContraction)
+        .def("kernighanLin", &EdgeContractionSolver::kernighanLin)
+        .def("greedy_matchings_edge_contraction", &EdgeContractionSolver::greedyMatchingsEdgeContraction, pybind11::arg("m") = maxInt)
+        .def("greedy_matchings_edge_contraction_with_multicut_applied", &EdgeContractionSolver::greedyMatchingsEdgeContractionWithMulticutApplied)
         .def("spanning_tree_edge_contraction", &EdgeContractionSolver::spanningTreeEdgeContraction)
         .def("spanning_tree_edge_contraction_continued", &EdgeContractionSolver::spanningTreeEdgeContractionContinued)
         .def("maximum_matching", &EdgeContractionSolver::maximumMatching)
@@ -1172,5 +1442,6 @@ PYBIND11_MODULE(edge_contraction_solver, m) {
         .def("get_multicut", &EdgeContractionSolver::getMulticut)
         .def("get_elapsed_time", &EdgeContractionSolver::getElapsedTime)
         .def("get_score", &EdgeContractionSolver::getScore)
-        .def("get_contraction_history", &EdgeContractionSolver::getContractionHistory);
+        .def("get_contraction_history", &EdgeContractionSolver::getContractionHistory)
+        .def("activate_track_history", &EdgeContractionSolver::activateTrackHistory);
 }
